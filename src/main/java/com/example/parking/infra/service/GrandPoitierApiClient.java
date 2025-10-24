@@ -54,8 +54,8 @@ public class GrandPoitierApiClient implements ParkingProviderApiClient {
     }
     catch (Exception e) {
       // TODO proper handling to be implemented
-      log.error("Error fetching parkings from {}", provider.getApiUrl(), e);
-      return CompletableFuture.completedFuture(List.of());
+      log.warn("Error fetching parkings from {}", provider.getApiUrl(), e);
+      return CompletableFuture.failedFuture(e);
     }
   }
 
@@ -83,8 +83,10 @@ public class GrandPoitierApiClient implements ParkingProviderApiClient {
 
     String[] latLon = rec._geopoint().split(",");
 
-    // TODO: Same error handling as above in case latLon.length()!=2
-
+    if (latLon.length != 2) {
+      // Log error and return null, it will be discarded later
+      return;
+    }
     dto.setLat(Double.parseDouble(latLon[0]));
     dto.setLng(Double.parseDouble(latLon[1]));
   }

@@ -7,12 +7,15 @@ import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 
+import com.example.parking.application.exceptions.ApplicationError;
 import com.example.parking.application.gateway.ParkingProviderGateway;
 import com.example.parking.application.model.out.ParkingDtoOut;
 import com.example.parking.application.service.DistanceProviderApiClient;
 import com.example.parking.application.service.ParkingProviderApiClient;
 import com.example.parking.application.service.ParkingProviderApiClientFactory;
 import com.example.parking.domain.ParkingProvider;
+
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Use case to find the nearest parking provider to a given location.
@@ -25,11 +28,12 @@ import com.example.parking.domain.ParkingProvider;
  * 6. Return the sorted list of parkings
  */
 @Service
+@Slf4j
 public class FindParkingsNearToCoordinatesUC {
 
-  private final ParkingProviderGateway parkingProviderGateway;
+  private final ParkingProviderGateway parkingProviderGtw;
 
-  private final ParkingProviderApiClientFactory apiConverterRepo;
+  private final ParkingProviderApiClientFactory apiClientFactory;
 
   private final DistanceProviderApiClient distanceProviderApiClient;
 
@@ -37,36 +41,55 @@ public class FindParkingsNearToCoordinatesUC {
       ParkingProviderApiClientFactory parkingProviderApiConverterRepository,
       DistanceProviderApiClient distanceProviderApiClient) {
 
-    this.parkingProviderGateway = parkingProviderGateway;
-    this.apiConverterRepo = parkingProviderApiConverterRepository;
+    this.parkingProviderGtw = parkingProviderGateway;
+    this.apiClientFactory = parkingProviderApiConverterRepository;
     this.distanceProviderApiClient = distanceProviderApiClient;
   }
 
   public CompletableFuture<List<ParkingDtoOut>> execute(double lat, double lng) {
-    return parkingProviderGateway.getNearestProvider(lat, lng)
-        .thenCompose(providerOpt -> providerOpt
-            .map(provider -> fetchParkingListFromProvider(provider, lat, lng))
-            .orElse(CompletableFuture.completedFuture(List.of())));
+
+    return parkingProviderGtw.getNearestProvider(lat, lng)
+        .thenCompose(providerOpt -> {
+
+          if (providerOpt.isEmpty()) {
+            throw new ApplicationError("No provider nearby");
+          }
+
+          return fetchParkingListFromProvider(providerOpt.get(), lat, lng);
+        });
   }
 
   private CompletableFuture<List<ParkingDtoOut>> fetchParkingListFromProvider(ParkingProvider provider, double lat,
       double lng) {
 
-    Optional<ParkingProviderApiClient> apiClient = apiConverterRepo.getConverter(provider);
-    return apiClient
-        .map(client -> client.fetchParkings(provider).thenCompose(parkings -> setParkingsDistance(parkings, lat, lng)))
-        .orElse(CompletableFuture.completedFuture(List.of()));
+    Optional<ParkingProviderApiClient> apiClient = apiClientFactory.getConverter(provider);
+
+    if (apiClient.isEmpty()) {
+      throw new ApplicationError("No api client found for provider " + provider.getName());
+    }
+
+    return apiClient.get()
+        .fetchParkings(provider)
+        .exceptionally(e -> {
+          throw new ApplicationError("No parking available");
+        })
+        .thenCompose(parkings -> setParkingsDistance(parkings, lat, lng));
   }
 
   private CompletableFuture<List<ParkingDtoOut>> setParkingsDistance(List<ParkingDtoOut> parkings, double lat,
       double lng) {
 
-    List<CompletableFuture<ParkingDtoOut>> parkingFutures = parkings.stream()
+    List<CompletableFuture<Optional<ParkingDtoOut>>> parkingFutures = parkings.stream()// This could be parallelized
         .map(parking -> distanceProviderApiClient
             .getDistanceInMeters(lat, lng, parking.getLat(), parking.getLng())
             .thenApply(distance -> {
               parking.setDistance_m(distance);
-              return parking;
+              return Optional.of(parking);
+            })
+            .exceptionally(e -> {
+              log.error("Error getting distance for parking {}", parking, e);
+              // We are checking one parking at a time, we decide to skip the one in error
+              return Optional.empty();
             }))
         .collect(Collectors.toList());
 
@@ -74,11 +97,13 @@ public class FindParkingsNearToCoordinatesUC {
   }
 
   private CompletableFuture<List<ParkingDtoOut>> combineAndSortParkings(
-      List<CompletableFuture<ParkingDtoOut>> parkingFutures) {
+      List<CompletableFuture<Optional<ParkingDtoOut>>> parkingFutures) {
 
     return CompletableFuture.allOf(parkingFutures.toArray(new CompletableFuture[0]))
         .thenApply(v -> parkingFutures.stream()
             .map(CompletableFuture::join)
+            .filter(Optional::isPresent)
+            .map(Optional::get)
             .sorted((p1, p2) -> p1.getDistance_m() - p2.getDistance_m())
             .collect(Collectors.toList()));
   }

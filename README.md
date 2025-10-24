@@ -54,3 +54,7 @@ The project is structured in a "clean architecturish" style with a separation be
 In the method and variable names I always explicited the unit of measure since, by experience, I know that doing otherwise could lead to errors.
 
 It took me 7h to complete this task. 
+
+###
+
+Updates: I the end I got back to add a stub of exception handling and improving readability. You can count 30 minutes more.
